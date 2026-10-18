@@ -1,15 +1,18 @@
 
 import os
 import requests
+from datetime import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, HTTPException, Depends
+from pydantic import BaseModel, Field, ConfigDict
+from sqlalchemy.orm import Session
+from database import Project, Requirement, get_db, init_db
 
 load_dotenv()
 
 app = FastAPI(title="BuildScope AI")
 
-
+init_db()
 class ResearchRequest(BaseModel):
     query: str = Field(min_length=3, max_length=300)
 
@@ -346,3 +349,119 @@ def generate_buildability_passport(idea, competitors, feature_comparison):
         ],
         "overall_status": "Preliminary research; not yet validated"
     }
+# ---------------- PROJECT DATABASE APIs ----------------
+
+class ProjectCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=200)
+    idea: str = Field(min_length=10, max_length=2000)
+    target_users: str = Field(min_length=2, max_length=300)
+    problem_statement: str = Field(min_length=10, max_length=2000)
+    expected_outcome: str = Field(min_length=5, max_length=2000)
+
+
+class ProjectResponse(ProjectCreate):
+    id: int
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RequirementCreate(BaseModel):
+    title: str = Field(min_length=2, max_length=200)
+    description: str = Field(min_length=5, max_length=2000)
+    requirement_type: str = Field(
+        default="functional",
+        pattern="^(functional|non-functional)$"
+    )
+    priority: str = Field(
+        default="medium",
+        pattern="^(low|medium|high)$"
+    )
+
+
+class RequirementResponse(RequirementCreate):
+    id: int
+    project_id: int
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+@app.post("/projects", response_model=ProjectResponse, status_code=201)
+def create_project(
+    project_data: ProjectCreate,
+    db: Session = Depends(get_db)
+):
+    project = Project(**project_data.model_dump())
+    db.add(project)
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+@app.get("/projects", response_model=list[ProjectResponse])
+def list_projects(db: Session = Depends(get_db)):
+    return db.query(Project).order_by(Project.id.desc()).all()
+
+
+@app.get("/projects/{project_id}", response_model=ProjectResponse)
+def get_project(project_id: int, db: Session = Depends(get_db)):
+    project = db.query(Project).filter(
+        Project.id == project_id
+    ).first()
+
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    return project
+
+
+@app.post(
+    "/projects/{project_id}/requirements",
+    response_model=RequirementResponse,
+    status_code=201
+)
+def create_requirement(
+    project_id: int,
+    requirement_data: RequirementCreate,
+    db: Session = Depends(get_db)
+):
+    project = db.query(Project).filter(
+        Project.id == project_id
+    ).first()
+
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    requirement = Requirement(
+        project_id=project_id,
+        **requirement_data.model_dump()
+    )
+
+    db.add(requirement)
+    db.commit()
+    db.refresh(requirement)
+    return requirement
+
+
+@app.get(
+    "/projects/{project_id}/requirements",
+    response_model=list[RequirementResponse]
+)
+def list_requirements(
+    project_id: int,
+    db: Session = Depends(get_db)
+):
+    project = db.query(Project).filter(
+        Project.id == project_id
+    ).first()
+
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    return (
+        db.query(Requirement)
+        .filter(Requirement.project_id == project_id)
+        .order_by(Requirement.id.asc())
+        .all()
+    )
